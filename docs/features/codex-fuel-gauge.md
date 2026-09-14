@@ -2,11 +2,11 @@
 
 <!-- feature-id: codex-fuel-gauge -->
 <!-- feature-title: 油表盘插件 -->
-<!-- feature-aliases: Codex Fuel Gauge, 油表盘, Codex 用量油表 -->
+<!-- feature-aliases: codex油表盘 -->
 <!-- feature-status: active -->
 <!-- feature-summary: 登录后常驻显示 Codex 额度与本机 CPU、内存、网络实时状态及应用 Top 5 的菜单栏悬浮仪表台。 -->
-<!-- last-verified: 2026-09-12 -->
-<!-- code-basis: HEAD unborn; working-tree=dirty -->
+<!-- last-verified: 2026-09-14 -->
+<!-- code-basis: HEAD 2bf5d47542da; worktree-digest sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 -->
 
 ## 快速上下文
 
@@ -60,7 +60,7 @@
 - 额度读取成功后，菜单栏按窗口时长升序显示百分比（例如 `73% | 91%`）；单窗口悬浮窗显示油表，双窗口悬浮窗显示带 `5 小时窗口`/`7 天窗口` 标签的额度卡、套餐标签、连接状态、系统总览和可切换的应用 Top 5。
 - 点击菜单栏可以显示/隐藏油表、刷新或重连 Codex；隐藏面板后系统采样降为每 5 秒，Codex 启动不会强制重新显示。
 - Codex 终止通知到达后，应用取消待执行的额度重连、停止 App Server、清空额度快照并回到“等待 Codex 启动”，面板保持可见。
-- 首次启动会尝试注册为登录项；合法签名使用 `SMAppService.mainApp`，状态为 `notFound` 的临时签名环境写入用户级 LaunchAgent；如果状态为 `requiresApproval`，菜单栏提供打开系统登录项设置的入口。环境变量 `CODEX_FUEL_GAUGE_DISABLE_LOGIN_ITEM=1` 仅用于冒烟测试时跳过自动注册。
+- 应用启动时会读取当前登录项状态；在状态为 `notRegistered` 或 `notFound` 且用户未禁用时尝试注册，失败后下次启动仍会重试。合法签名使用 `SMAppService.mainApp`，状态为 `notFound` 的临时签名环境写入用户级 LaunchAgent；如果状态为 `requiresApproval`，菜单栏提供打开系统登录项设置的入口。环境变量 `CODEX_FUEL_GAUGE_DISABLE_LOGIN_ITEM=1` 仅用于冒烟测试时跳过自动注册。
 - Codex 可执行文件优先从 bundle identifier 对应应用的 `Contents/Resources/codex` 定位，其次尝试固定的 ChatGPT 应用路径、用户 `Applications` 路径、`/opt/homebrew/bin/codex` 和 `/usr/local/bin/codex`。
 - 系统指标采样前台每秒、隐藏每 5 秒；网络 Top 5 使用 `/usr/bin/nettop -P -L 1 -d -x -n -s <interval> -J bytes_in,bytes_out`，每个子进程输出一个包含当前采样周期增量的 CSV block 后按采样间隔重启；网络排行按 PID 直接挂接该周期增量，不把 `-d` 字段当作累计计数器。
 
@@ -96,7 +96,7 @@
 
 ### `account/rateLimits/read`
 
-- **输入**：无参数 JSON-RPC 请求，初始化后发送，手动刷新和 30 秒定时器会再次发送；每次请求使用单调递增的整数 ID。
+- **输入**：无参数 JSON-RPC 请求，初始化后发送，手动刷新和 30 秒定时器会再次发送；同一客户端实例内请求 ID 递增，客户端重启时从 `1` 重新开始。
 - **输出**：读取 `result.rateLimits` 兼容单桶视图，或 `result.rateLimitsByLimitId` 多桶视图；每个桶可包含 `primary`、`secondary`、`credits`、`planType` 和重置状态。
 - **消费者**：`CodexAppServerClient` 转换为 `RateLimitSnapshot`，`AppModel` 替换当前内存快照并将连接状态设为 `connected`。
 - **错误与超时**：请求进入 pending 集合，12 秒后仍未返回则停止当前连接并触发退避重连。
@@ -125,14 +125,14 @@
 - `QuotaWindow` 保存 `usedPercent`、`windowDurationMins` 和 Unix 秒级 `resetsAt`，计算并限制 `remainingPercent`。
 - `LimitBucket` 保存桶标识、显示名称、primary/secondary 窗口、credits、套餐和限额状态；`merging(_:)` 用于处理字段不完整的实时通知。
 - `RateLimitsResult` 对应一次 `account/rateLimits/read` 返回；`RateLimitSnapshot` 把多桶结果归一到内存字典，并生成可排序的 `WindowEntry` 列表。
-- 持久化只使用 `UserDefaults` 的 `floatingPanelOrigin`、`didAttemptInitialLoginItemRegistration` 和 `selectedSystemMetric`；额度/系统快照、pending 请求和重连计数均不落盘。
+- 持久化只使用 `UserDefaults` 的 `floatingPanelOrigin`、`didAttemptInitialLoginItemRegistration` 和 `selectedSystemMetric`；其中 `didAttemptInitialLoginItemRegistration` 当前只记录曾尝试，不参与后续策略决策；额度/系统快照、pending 请求和重连计数均不落盘。
 - 当前没有数据库、迁移、索引、外键或数据回填；Codex 的认证和额度数据由外部 App Server 管理。
 - `Codable` 默认忽略新增字段；缺失的可选字段显示为未知/不适用，保持对未来额度桶字段的读取兼容。
 
 ## 核心流程
 
 1. `AppDelegate.applicationDidFinishLaunching` 设置 accessory activation policy，创建面板和菜单栏项，随后调用 `AppModel.start()`。
-2. `AppModel` 注册 `CodexLifecycleMonitor`、读取登录项状态并按首次启动规则选择 `SMAppService.mainApp` 或用户级 LaunchAgent，显示面板并启动系统采样和 30 秒额度定时器。
+2. `AppModel` 注册 `CodexLifecycleMonitor`、读取登录项状态并按当前状态与用户禁用标记选择 `SMAppService.mainApp` 或用户级 LaunchAgent，显示面板并启动系统采样和 30 秒额度定时器。
 3. 监测到 Codex 已运行或收到启动通知后，`AppModel.connect()` 调用 `CodexBinaryLocator.locate()`，设置 `connecting` 并要求 `CodexAppServerClient` 启动子进程；面板可见性不变。
 4. 客户端在串行队列中发送初始化握手和 `account/rateLimits/read`；完整 JSON 行进入解析器，初始化成功更新连接状态，额度响应替换 `RateLimitSnapshot`。
 5. `SystemMetricsSampler` 发布 CPU、内存、网卡总速率和应用聚合快照；SwiftUI 在方案 A 中重绘三张总览卡和所选 Top 5。
@@ -162,7 +162,7 @@
 - `CodexAppServerClient` 使用串行 GCD 队列保护 `Process`、管道、JSONL 缓冲区、请求 ID 和 pending 集合；stdout 可读回调只负责把数据重新排队。
 - `NetTopClient` 使用独立串行队列保护 `Process`、输出管道、CSV 分块缓冲区和停止状态；`SystemMetricsSampler` 使用自己的串行队列合并原生样本与网络样本。
 - `AppModel` 标记为 `@MainActor`；客户端回调通过 `DispatchQueue.main` 回到 UI 状态域，避免 SwiftUI 和 AppKit 状态竞争。
-- 初始化请求固定使用 ID `0`；读取请求使用递增 ID，响应只移除匹配的 pending ID，避免不同读取的响应相互解析。
+- 初始化请求固定使用 ID `0`；读取请求在单个客户端实例内使用递增 ID，客户端重启时会重置为 `1`；响应只移除匹配的 pending ID。连接代际未纳入超时回调判定，详见已知问题。
 - 显式停止设置 `intentionallyStopping` 并清理句柄，termination handler 不重复报告断连；重新启动客户端会先停止上一实例。
 - 当前没有跨进程锁、幂等键或磁盘去重；每次手动刷新和定时刷新都会产生独立读取请求。
 
@@ -183,7 +183,7 @@
 - **网络依赖**：固定使用 `/usr/bin/nettop`，仅依赖其 `bytes_in`/`bytes_out` CSV 输出；缺失或失败时网络 Top 5 降级。
 - **登录启动策略**：`SMAppService.Status.notFound` 时使用 `~/Library/LaunchAgents/com.codexfuelgauge.app.plist`，用户主动关闭后记录 `launchAtLoginUserDisabled`。
 - **新增状态**：`selectedSystemMetric` 默认 `cpu`，可在仪表台切换 CPU/内存/网络排行。
-- **测试开关**：`CODEX_FUEL_GAUGE_DISABLE_LOGIN_ITEM=1` 跳过首次自动登录项注册，仅供测试运行；不是用户配置项。
+- **测试开关**：`CODEX_FUEL_GAUGE_DISABLE_LOGIN_ITEM=1` 跳过自动登录项注册，仅供测试运行；不是用户配置项。
 - **构建依赖**：`codex-fuel/scripts/swiftc_compat.sh` 固定使用本机 Command Line Tools 的 Swift 编译器；测试目标固定链接本机 `Testing.framework` 和宏插件路径。
 - **外部服务**：无自有外部服务；额度和认证请求由 Codex App Server 代表用户处理。
 
@@ -200,14 +200,16 @@
 
 ### 已执行
 
-- `codex-fuel/scripts/test.sh` — 当前 Swift 6.4/Command Line Tools 版本已完成测试目标编译，但完整测试运行无输出持续超过 1 分钟后停止；过滤执行的 `RateLimitModelsTests`（7 项）和 `SystemDashboardPresentationTests`（4 项）均通过。
-- `codex-fuel/scripts/package_app.sh` — 退出码 0；完成 production 构建、`.app` 目录生成和临时签名。
-- `codex-fuel/scripts/install_local.sh` — 退出码 0；安装到 `~/Applications/CodexFuelGauge.app` 并通过 codesign 校验。
-- `codesign --verify --deep --strict codex-fuel/dist/CodexFuelGauge.app` — 通过；应用签名在磁盘上有效。
-- `plutil -lint codex-fuel/dist/CodexFuelGauge.app/Contents/Info.plist` — `OK`；bundle 元数据可解析。
+- `feature_docs.py validate --mode structural`、`validate-contract` — 2026-09-14 通过；档案结构、元数据和合同校验通过。
+- `feature_docs.py validate --mode fresh` — 2026-09-14 通过；档案绑定当前 HEAD `2bf5d47542da` 和无实现工作树改动的 digest。
+- `codex-fuel/scripts/test.sh` — 2026-09-14 按档案命令复跑，在 manifest 阶段因 `.build/module-cache-compat` 缓存引用旧路径 `/Users/caihanbing/dev/codex-fuel` 而失败。
+- `codex-fuel/scripts/package_app.sh` — 2026-09-14 同样因旧模块缓存未进入构建阶段；使用全新 scratch 路径的 release 构建退出码 0，但有 linker 搜索路径警告。
+- 使用全新 scratch 路径执行 `swift test --disable-sandbox` — 48 项中 47 项通过，`CodexAppServerClientTests` 的 fake 子进程握手测试在 60 秒时限超时；过滤的 `RateLimitModelsTests`（7 项）和 `SystemDashboardPresentationTests`（4 项）共 11 项通过。
+- `install_local.sh` — 2026-09-12 历史验证退出码 0；安装到 `~/Applications/CodexFuelGauge.app` 并通过 codesign 校验，本次审计未重复覆盖安装。
+- `codesign --verify --deep --strict codex-fuel/dist/CodexFuelGauge.app`、`plutil -lint codex-fuel/dist/CodexFuelGauge.app/Contents/Info.plist` — 现有临时签名产物校验通过，Info.plist 为 `OK`。
 - `zsh -n codex-fuel/scripts/test.sh codex-fuel/scripts/package_app.sh codex-fuel/scripts/install_local.sh codex-fuel/scripts/swiftc_compat.sh` — 通过；构建/安装脚本语法有效。
 - `nettop -P -L 2 -d -x -n -s 1 -J bytes_in,bytes_out` — 在沙箱外退出码 0；确认普通用户可运行和实际 CSV 字段。
-- 当前安装版 UI — 实测同时显示 `5 小时窗口 93%` 与 `7 天窗口 48%` 两张额度卡；额度模型验证菜单栏格式为 `73% | 91%`。
+- 2026-09-12 历史 UI 验证 — 安装版同时显示 `5 小时窗口 93%` 与 `7 天窗口 48%` 两张额度卡；额度模型验证菜单栏格式为 `73% | 91%`。
 
 ### 未执行
 
@@ -286,11 +288,37 @@
 
 ### 构建脚本绑定本机 Command Line Tools 路径
 
-- **影响**：`codex-fuel/Package.swift` 测试目标和 `swiftc_compat.sh` 使用固定的 `/Library/Developer/CommandLineTools` 路径，其他开发机的 Swift/SDK 安装布局可能无法直接运行测试脚本。
-- **当前处理**：脚本集中设置 `SDKROOT`、模块缓存和兼容编译器，当前目标机器可构建并签名。
-- **后续动作**：改为动态发现 Swift 工具链、Testing framework 和宏插件路径，并在另一台 macOS 上验证安装流程。
+- **影响**：`codex-fuel/Package.swift` 测试目标和 `swiftc_compat.sh` 使用固定的 `/Library/Developer/CommandLineTools` 路径；此外，`.build/module-cache-compat` 会保留绝对路径，仓库移动后标准测试/打包脚本可能在 manifest 阶段失败。
+- **当前处理**：使用全新 scratch 路径可以完成 release 构建；标准脚本尚未自动检测或失效化旧模块缓存。
+- **后续动作**：动态发现 Swift 工具链、Testing framework 和宏插件路径，并按仓库路径隔离或自动失效化模块缓存，再在另一台 macOS 上验证安装流程。
+
+### 登录项尝试标记未参与策略决策
+
+- **影响**：`didAttemptInitialLoginItemRegistration` 当前只写入、不读取，不能表达或阻止重复注册尝试；档案和实现若按“一次性首次启动”理解会产生偏差。
+- **当前处理**：实际策略由 `SMAppService` 状态和 `launchAtLoginUserDisabled` 决定；未注册或找不到登录项时每次启动重试，已有测试覆盖该重试策略。
+- **后续动作**：明确保留“失败后重试”并移除无效标记，或让标记参与明确的首次启动策略；补充对应持久化行为测试。
+
+### 重连期间的请求超时未按连接代际隔离
+
+- **影响**：客户端重启会把请求 ID 重置为 `1`；旧连接的 12 秒超时回调只按 ID 查找 pending 集合，可能误删新连接同编号请求并停止当前连接。
+- **当前处理**：所有状态仍由客户端串行队列保护，响应按请求 ID 匹配；没有连接 generation 或可取消的超时句柄，也没有重连竞态测试。
+- **后续动作**：为客户端实例或连接代际加入 token，并让响应/超时同时校验 token；补充“重连后旧超时到达”的回归测试。
+
+### App Server 客户端集成测试无法正常退出
+
+- **影响**：全量 `swift test` 不能稳定作为通过证据；fake App Server 握手测试在 60 秒时限超时，无法证明真实子进程通信闭环。
+- **当前处理**：其余 47 项测试通过，额度模型和仪表盘展示的 11 项过滤测试通过；当前未确定 fake 子进程测试未完成的具体阻塞点。
+- **后续动作**：定位 fake 子进程的 stdin/stdout/termination 清理问题，确保测试结束时关闭子进程和文件句柄，并恢复全量测试的可靠退出。
 
 ## 变更记录
+
+### 2026-09-14 — 规范功能别名并复核档案新鲜度
+
+- **状态**：已完成
+- **变化**：将档案和功能索引的唯一别名统一为 `codex油表盘`；刷新最后核验日期和当前 Git `code-basis`，并补充本次审计发现的登录项、重连超时和测试退出问题。
+- **原因**：使中文功能名称可被 Finder 精确定位，并让档案核验基线对应当前 HEAD 和实现工作树状态。
+- **兼容性**：不修改源码、协议、配置或运行行为；仅影响档案检索、核验元数据和持久化问题说明。
+- **验证**：结构校验、契约校验和 fresh 校验通过；清洁 scratch release 构建通过；额度/仪表盘过滤测试 11 项通过；全量测试仍有 1 项 fake App Server 握手测试 60 秒超时。
 
 ### 2026-09-12 — 同时展示 5 小时和 7 天额度
 
