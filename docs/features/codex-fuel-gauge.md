@@ -5,14 +5,14 @@
 <!-- feature-aliases: codex油表盘 -->
 <!-- feature-status: active -->
 <!-- feature-summary: 登录后常驻显示 Codex 额度与本机 CPU、内存、网络实时状态及应用 Top 5 的菜单栏悬浮仪表台。 -->
-<!-- last-verified: 2026-09-14 -->
-<!-- code-basis: HEAD 2bf5d47542da; worktree-digest sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 -->
+<!-- last-verified: 2026-10-20 -->
+<!-- code-basis: HEAD bcf7a9e2c89f; worktree-digest sha256:051b9925d761aecb5ef3393fe603c075cc2554628367698ef8df43149b8c15a3 -->
 
 ## 快速上下文
 
 “油表盘插件”当前实现为一个独立的 macOS 菜单栏辅助应用 `Codex Fuel Gauge`，不是注入 Codex 的内部插件。应用通过登录项在用户登录 macOS 后启动并立即显示统一悬浮仪表台；系统指标持续采样，Codex 额度通过 Codex 自带的 `app-server --stdio` 获取，Codex 启停只影响额度区域，不再影响面板可见性。
 
-入口是 `AppDelegate` 创建的 `NSStatusItem` 和 `NSPanel`。额度和系统指标快照只保存在内存，窗口位置、首次登录项注册尝试、用户禁用标记和 Top 5 当前指标保存在 `UserDefaults`；临时签名环境的登录项 fallback 写入用户级 `~/Library/LaunchAgents/com.codexfuelgauge.app.plist`。应用不读取或复制 `~/.codex/auth.json`，也不包含服务端部署组件。构建目标为 macOS 14+，本地打包产物位于 `codex-fuel/dist/CodexFuelGauge.app`。
+入口是 `AppDelegate` 创建的 `NSStatusItem` 和 `NSPanel`。额度和系统指标快照只保存在内存，窗口位置、首次登录项注册尝试、用户禁用标记和 Top 5 当前指标保存在 `UserDefaults`；标题行提供专用拖动区域，正文保留在纵向 `ScrollView` 中。临时签名环境的登录项 fallback 写入用户级 `~/Library/LaunchAgents/com.codexfuelgauge.app.plist`。应用不读取或复制 `~/.codex/auth.json`，也不包含服务端部署组件。构建目标为 macOS 14+，本地打包产物位于 `codex-fuel/dist/CodexFuelGauge.app`。
 
 ## 目标与边界
 
@@ -61,7 +61,7 @@
 - 点击菜单栏可以显示/隐藏油表、刷新或重连 Codex；隐藏面板后系统采样降为每 5 秒，Codex 启动不会强制重新显示。
 - Codex 终止通知到达后，应用取消待执行的额度重连、停止 App Server、清空额度快照并回到“等待 Codex 启动”，面板保持可见。
 - 应用启动时会读取当前登录项状态；在状态为 `notRegistered` 或 `notFound` 且用户未禁用时尝试注册，失败后下次启动仍会重试。合法签名使用 `SMAppService.mainApp`，状态为 `notFound` 的临时签名环境写入用户级 LaunchAgent；如果状态为 `requiresApproval`，菜单栏提供打开系统登录项设置的入口。环境变量 `CODEX_FUEL_GAUGE_DISABLE_LOGIN_ITEM=1` 仅用于冒烟测试时跳过自动注册。
-- Codex 可执行文件优先从 bundle identifier 对应应用的 `Contents/Resources/codex` 定位，其次尝试固定的 ChatGPT 应用路径、用户 `Applications` 路径、`/opt/homebrew/bin/codex` 和 `/usr/local/bin/codex`。
+- Codex 可执行文件按顺序尝试 bundle identifier 对应应用及固定 ChatGPT 应用路径中的新版 `Contents/Resources/codex-cli/bin/codex` wrapper、`Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex` 嵌套二进制和旧版 `Contents/Resources/codex`，最后尝试 `/opt/homebrew/bin/codex` 和 `/usr/local/bin/codex`。
 - 系统指标采样前台每秒、隐藏每 5 秒；网络 Top 5 使用 `/usr/bin/nettop -P -L 1 -d -x -n -s <interval> -J bytes_in,bytes_out`，每个子进程输出一个包含当前采样周期增量的 CSV block 后按采样间隔重启；网络排行按 PID 直接挂接该周期增量，不把 `-d` 字段当作累计计数器。
 
 ## 架构与代码地图
@@ -78,8 +78,8 @@
 - `codex-fuel/Sources/CodexFuelGauge/AppServerMessageParser.swift` — `AppServerMessageParser.parse(_:)`：把 JSON 行转换为初始化、额度响应、额度更新、错误或忽略事件。
 - `codex-fuel/Sources/CodexFuelGauge/JSONLFramer.swift` — `JSONLFramer`：处理分片输入、换行和 CRLF，输出完整 JSON 行。
 - `codex-fuel/Sources/CodexFuelGauge/RateLimitModels.swift` — `QuotaWindow`、`LimitBucket`、`RateLimitsResult`、`RateLimitSnapshot`：额度解码、窗口时长排序、单/双窗口菜单栏格式和部分更新合并。
-- `codex-fuel/Sources/CodexFuelGauge/GaugeView.swift` — `GaugeRootView`、`QuotaWindowOverview`、`QuotaWindowCard`、`SystemMetricCard`、`SystemApplicationRow`、`GaugeDial`：方案 A 统一 SwiftUI 仪表台。
-- `codex-fuel/Sources/CodexFuelGauge/FloatingPanelController.swift` — `FloatingPanelController`：配置 420pt 无边框置顶 `NSPanel`、跨 Space 行为、拖动和高度上限。
+- `codex-fuel/Sources/CodexFuelGauge/GaugeView.swift` — `GaugeRootView`、`PanelWindowDragHandle`、`PanelWindowReader`、`QuotaWindowOverview`、`QuotaWindowCard`、`SystemMetricCard`、`SystemApplicationRow`、`GaugeDial`：统一 SwiftUI 仪表台；拖动句柄仅覆盖额度卡标题行。
+- `codex-fuel/Sources/CodexFuelGauge/FloatingPanelController.swift` — `FloatingPanelController`、`PanelDragCoordinator`：配置 420pt 无边框置顶 `NSPanel`、跨 Space 行为、标题拖动坐标更新、`windowDidMove` 位置持久化和高度上限。
 - `codex-fuel/Package.swift` — macOS 14+ 可执行目标及 Swift Testing 测试目标；测试目标额外链接本机 Command Line Tools 的 `Testing.framework`。
 - `codex-fuel/Packaging/Info.plist` — `LSUIElement=true`、bundle identifier `com.codexfuelgauge.app` 和最低系统版本。
 - `codex-fuel/scripts/test.sh`、`codex-fuel/scripts/package_app.sh`、`codex-fuel/scripts/install_local.sh` — 兼容当前 Swift/SDK 补丁版本的测试、打包和用户目录安装入口。
@@ -137,7 +137,8 @@
 4. 客户端在串行队列中发送初始化握手和 `account/rateLimits/read`；完整 JSON 行进入解析器，初始化成功更新连接状态，额度响应替换 `RateLimitSnapshot`。
 5. `SystemMetricsSampler` 发布 CPU、内存、网卡总速率和应用聚合快照；SwiftUI 在方案 A 中重绘三张总览卡和所选 Top 5。
 6. `AppModel` 在主 actor 上合并额度/系统状态；手动刷新或实时通知更新额度，系统采样异常只影响对应来源并显示过期/不可用状态。
-7. Codex 终止后取消额度重连、停止 App Server、清空额度快照并回到等待状态；面板继续显示系统仪表台。
+7. 标题拖动句柄首次收到手势更新时记录窗口起点，后续按 translation 调用 `NSWindow.setFrameOrigin`；窗口移动通知由 `windowDidMove` 写入 `UserDefaults` 的 `floatingPanelOrigin`，下次启动时恢复。
+8. Codex 终止后取消额度重连、停止 App Server、清空额度快照并回到等待状态；面板继续显示系统仪表台。
 
 ## 异常与边界条件
 
@@ -178,7 +179,7 @@
 
 - **运行平台**：`codex-fuel/Package.swift` 声明 macOS 14+；应用使用 AppKit、SwiftUI、Combine、Foundation 和 ServiceManagement。
 - **应用元数据**：`codex-fuel/Packaging/Info.plist` 设置 `CFBundleIdentifier=com.codexfuelgauge.app`、`CFBundleExecutable=CodexFuelGauge`、`LSUIElement=true`。
-- **Codex 依赖**：需要安装并登录 Codex 桌面应用；实际可执行文件优先使用应用 bundle 的 `Contents/Resources/codex`。
+- **Codex 依赖**：需要安装并登录 Codex 桌面应用；兼容旧版 `Contents/Resources/codex` 和新版 `Contents/Resources/codex-cli/bin/codex` wrapper/嵌套 CLI 二进制布局。
 - **运行常量**：系统采样 1/5 秒、额度读取超时 12 秒、额度定时刷新 30 秒、额度 stale 判断 90 秒、两类重连延迟均为 2/5/15/30/60 秒、颜色阈值 30%/10%。
 - **网络依赖**：固定使用 `/usr/bin/nettop`，仅依赖其 `bytes_in`/`bytes_out` CSV 输出；缺失或失败时网络 Top 5 降级。
 - **登录启动策略**：`SMAppService.Status.notFound` 时使用 `~/Library/LaunchAgents/com.codexfuelgauge.app.plist`，用户主动关闭后记录 `launchAtLoginUserDisabled`。
@@ -210,10 +211,15 @@
 - `zsh -n codex-fuel/scripts/test.sh codex-fuel/scripts/package_app.sh codex-fuel/scripts/install_local.sh codex-fuel/scripts/swiftc_compat.sh` — 通过；构建/安装脚本语法有效。
 - `nettop -P -L 2 -d -x -n -s 1 -J bytes_in,bytes_out` — 在沙箱外退出码 0；确认普通用户可运行和实际 CSV 字段。
 - 2026-09-12 历史 UI 验证 — 安装版同时显示 `5 小时窗口 93%` 与 `7 天窗口 48%` 两张额度卡；额度模型验证菜单栏格式为 `73% | 91%`。
+- 2026-10-20 `CodexBinaryLocatorTests` 7 项、`AppServerProtocolTests`、`AppModelTests` 共 17 项通过；覆盖旧版路径、新版 wrapper、嵌套二进制、不可执行 wrapper fallback、无候选和注入 fallback 应用路径。
+- 2026-10-20 使用 `/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex` 执行 initialize 与 `account/rateLimits/read`，返回 `rateLimits`、`rateLimitsByLimitId` 等额度字段；协议解析和额度模型未修改。
+- 2026-10-20 clean scratch release 构建、`package_app.sh`、codesign、Info.plist 和脚本语法校验通过；全量测试中除既有 fake App Server 握手测试 60 秒超时外，其余测试通过。
+- 2026-10-20 安装最终 release 到 `~/Applications/CodexFuelGauge.app` 并重新打开后，油表盘进程启动了新版 wrapper 解析出的 App Server 子进程；菜单栏/面板额度显示仍需用户目视确认。
+- 2026-10-20 拖动修复最终 release `package_app.sh` 与 `install_local.sh` 通过；安装版长距离标题拖动将 `floatingPanelOrigin` 从 `{1113, 356}` 精确变为 `{1213, 256}`，正文拖动没有移动窗口，最后恢复到测试前的 `{1068, 389}`；Picker 可切换内存并恢复 CPU。正文滚轮/拖动测试未观察到明确滚动偏移，跨 Space 尚未实测。
 
 ### 未执行
 
-- 实际登录后自动启动、Codex 启停、悬浮窗拖动、跨 Space、菜单栏点击、应用图标和系统登录项批准流程 — 当前自动化测试没有 AppKit/Workspace 系统集成覆盖；双窗口仪表盘已在当前 Mac 手动验证，仍需真实重启确认。
+- 实际登录后自动启动、Codex 启停、标题区拖动跨 Space、正文实际滚动、菜单栏点击、应用图标和系统登录项批准流程 — 当前自动化测试没有 AppKit/Workspace 系统集成覆盖；本次安装版已验证标题拖动及位置保存/恢复、Picker 操作，滚动位移和跨 Space 仍需手动确认。
 - 不同 Codex 安装路径、未登录账户、上游网络失败和真实多账户切换 — 测试使用固定 fake 子进程和模型 fixture；剩余风险是本机安装布局或服务响应差异。
 - 额度读取请求的乱序响应 — 当前没有序列号或去重测试；多次手动刷新与定时刷新并发时需要人工观察最终显示值。
 - 与活动监视器对照 30 秒、睡眠/唤醒、`nettop` 进程异常退出和 60 秒自身资源预算 — 当前自动化测试没有真实系统集成覆盖。
@@ -258,6 +264,13 @@
 - **取舍**：应用重启后没有离线额度/系统历史，但不会显示可能过期的旧状态或引入本地敏感数据存储；仅记住用户的排行视角。
 - **证据**：`FloatingPanelController.windowDidMove`、`AppModel.registerAtLoginOnFirstLaunch`、`AppModel.selectedSystemMetric` 和快照类型的内存使用方式。
 
+### 使用标题行专用拖动手势移动悬浮面板
+
+- **决定**：仅在额度卡标题行覆盖 `PanelWindowDragHandle`；`PanelDragCoordinator` 逐事件读取 `NSEvent.mouseLocation` 的屏幕坐标差，并调用 `NSWindow.setFrameOrigin`。关闭 `isMovableByWindowBackground`，保留 `isMovable` 和 `windowDidMove` 的位置持久化逻辑。
+- **原因**：安装版的无边框、非激活 `NSPanel` 未能通过 `NSWindow.performDrag(with:)` 或 `WindowDragGesture` 启动移动；屏幕坐标增量不依赖会随面板移动的 SwiftUI 局部坐标系。
+- **取舍**：只在标题行拖动，正文保留给原 `ScrollView` 和 Picker；跨 Space 与实际正文滚动仍需真实 GUI 回归。
+- **证据**：`GaugeView.swift`、`FloatingPanelController.swift`；Apple 文档说明背景移动会允许窗口在任意背景位置拖动；标题专用拖动实测改变 `floatingPanelOrigin`，Picker 可交互。
+
 ### 使用原生系统接口和 nettop，而不是系统扩展
 
 - **决定**：CPU、内存、网卡总量和进程 CPU/内存使用 Darwin 公共接口；应用网络排行使用 `/usr/bin/nettop` CSV。
@@ -272,6 +285,13 @@
 - **取舍**：信息密度高于分页方案，但面板高度受屏幕限制并在内容过多时内部滚动。
 - **证据**：`GaugeRootView`、`SystemMetricCard`、`SystemApplicationRow`、`FloatingPanelController`。
 
+### 兼容 Codex CLI 的新旧 bundle 路径
+
+- **决定**：优先使用新版 `Contents/Resources/codex-cli/bin/codex` wrapper，其次使用嵌套 `CodexCLI.app/Contents/MacOS/codex`，最后保留旧版 `Contents/Resources/codex` 作为兼容 fallback。
+- **原因**：ChatGPT/Codex 升级后 CLI bundle 目录变化，旧 locator 返回空路径，导致 App Server 从未启动。
+- **取舍**：集中维护有限的相对路径候选并支持注入测试，不扫描任意目录；不改变 App Server 协议和额度解析。
+- **证据**：`CodexBinaryLocator`、`CodexBinaryLocatorTests`、当前 ChatGPT.app bundle 和 `account/rateLimits/read` 探针。
+
 ## 已知问题与后续工作
 
 ### 读取请求没有响应序列判定
@@ -282,15 +302,21 @@
 
 ### AppKit/系统集成自动化覆盖不足
 
-- **影响**：窗口层级、跨 Space、Workspace 启停通知和登录项批准依赖目标 Mac，当前 Swift Testing 不能证明这些系统行为。
-- **当前处理**：档案的用户回归准备提供可执行的本机验证步骤；应用状态和 `NSLog` 提供排障入口。
-- **后续动作**：在真实 macOS GUI 测试环境增加启动/退出、面板位置和 `SMAppService` 集成测试。
+- **影响**：窗口层级、跨 Space、Workspace 启停通知和登录项批准依赖目标 Mac，当前 Swift Testing 不能证明这些系统行为；当前拖动修复的正文滚动位移也尚未在 UI 自动化中确认。
+- **当前处理**：安装版已验证标题区拖动及 `floatingPanelOrigin` 更新/恢复、Picker 切换和正文拖动不会移动面板；滚动偏移和跨 Space 行为留待用户手动回归。应用状态和 `NSLog` 提供排障入口。
+- **后续动作**：在真实 macOS GUI 测试环境增加启动/退出、标题拖动、正文滚动、面板位置和 `SMAppService` 集成测试。
 
 ### 构建脚本绑定本机 Command Line Tools 路径
 
 - **影响**：`codex-fuel/Package.swift` 测试目标和 `swiftc_compat.sh` 使用固定的 `/Library/Developer/CommandLineTools` 路径；此外，`.build/module-cache-compat` 会保留绝对路径，仓库移动后标准测试/打包脚本可能在 manifest 阶段失败。
 - **当前处理**：使用全新 scratch 路径可以完成 release 构建；标准脚本尚未自动检测或失效化旧模块缓存。
 - **后续动作**：动态发现 Swift 工具链、Testing framework 和宏插件路径，并按仓库路径隔离或自动失效化模块缓存，再在另一台 macOS 上验证安装流程。
+
+### Codex CLI bundle 路径随版本变化
+
+- **影响**：未来 Codex 再次调整 CLI bundle 布局时，油表盘可能再次无法启动 App Server，额度区域回到 unavailable。
+- **当前处理**：locator 已覆盖旧路径、新版官方 wrapper 和嵌套二进制；定位测试覆盖三种布局，当前升级版 CLI 探针通过。
+- **后续动作**：后续升级时优先检查 `CodexBinaryLocatorTests` 和当前安装版探针；若出现新布局，新增明确候选和 fixture，不改额度协议解析。
 
 ### 登录项尝试标记未参与策略决策
 
@@ -307,10 +333,27 @@
 ### App Server 客户端集成测试无法正常退出
 
 - **影响**：全量 `swift test` 不能稳定作为通过证据；fake App Server 握手测试在 60 秒时限超时，无法证明真实子进程通信闭环。
-- **当前处理**：其余 47 项测试通过，额度模型和仪表盘展示的 11 项过滤测试通过；当前未确定 fake 子进程测试未完成的具体阻塞点。
+- **当前处理**：其余 54 项测试通过，额度模型和仪表盘展示的过滤测试通过；当前未确定 fake 子进程测试未完成的具体阻塞点。
 - **后续动作**：定位 fake 子进程的 stdin/stdout/termination 清理问题，确保测试结束时关闭子进程和文件句柄，并恢复全量测试的可靠退出。
 
 ## 变更记录
+
+### 2026-10-20 — 兼容升级后的 Codex CLI bundle 路径
+
+- **状态**：部分完成
+- **变化**：`CodexBinaryLocator` 优先使用新版 `codex-cli/bin/codex` wrapper，其次使用嵌套 CLI 二进制并保留旧版路径；增加可注入定位逻辑和 7 项路径测试；同步 Work Item `WORK-20261020-001`。
+- **原因**：ChatGPT/Codex `26.1013.40934` 将 CLI 移出旧 `Contents/Resources/codex`，导致油表盘无法启动 App Server 和读取额度。
+- **兼容性**：不修改 App Server 协议、额度模型、重连机制、双窗口 UI、数据库或服务端；兼容旧版和新版本地 CLI bundle。
+- **验证**：17 项定位/协议/AppModel 测试、当前 CLI wrapper 的额度探针、clean scratch release 构建、`package_app.sh`、codesign、Info.plist 和安装版 App Server 子进程 smoke 通过；全量测试仍有既有 fake App Server 握手测试 60 秒超时，真实安装版 UI 回归待用户执行。
+
+### 2026-10-20 — 修复油表面板标题区拖动
+
+- **状态**：部分完成
+- **变化**：在“CODEX FUEL / 额度仪表”标题行增加专用拖动区域，由 `PanelDragCoordinator` 根据手势位移移动 `NSPanel`；保留 `windowDidMove` 的位置记忆。
+- **原因**：仅启用窗口背景拖动不足以让非激活、无边框面板从 SwiftUI `ScrollView` 内容中启动窗口移动。
+- **兼容性**：不改变额度协议、系统采样、布局、存储格式或 Picker；仅标题行响应新拖动手势，其他正文视图保持原有结构。
+- **验证**：release 打包和本地安装通过；安装版长距离标题拖动按预期更新并保存窗口坐标，标题外拖动不移动面板，测试后恢复到 `{1068, 389}`，Picker 可切换。正文滚动位移和跨 Space 尚待手动确认；未将其记为已通过。
+- **关联 Work Item**：`WORK-20261020-002`。
 
 ### 2026-09-14 — 规范功能别名并复核档案新鲜度
 

@@ -1,6 +1,70 @@
 import AppKit
 import SwiftUI
 
+@MainActor
+private struct PanelWindowDragHandle: View {
+    let coordinator: PanelDragCoordinator
+
+    var body: some View {
+        Rectangle()
+            .fill(.clear)
+            .contentShape(Rectangle())
+            .overlay(alignment: .topLeading) {
+                PanelWindowReader(coordinator: coordinator)
+                    .frame(width: 0, height: 0)
+                    .allowsHitTesting(false)
+            }
+            .highPriorityGesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { _ in coordinator.updateDrag() }
+                    .onEnded { _ in coordinator.endDrag() }
+            )
+            .onHover { hovering in
+                if hovering {
+                    NSCursor.openHand.set()
+                } else {
+                    NSCursor.arrow.set()
+                }
+            }
+            .help("拖动面板")
+            .accessibilityHidden(true)
+    }
+}
+
+@MainActor
+private struct PanelWindowReader: NSViewRepresentable {
+    let coordinator: PanelDragCoordinator
+
+    func makeNSView(context: Context) -> PanelWindowReaderView {
+        let view = PanelWindowReaderView(frame: .zero)
+        view.onWindowChange = { [weak coordinator] window in
+            coordinator?.setWindow(window)
+        }
+        return view
+    }
+
+    func updateNSView(_ nsView: PanelWindowReaderView, context: Context) {
+        nsView.onWindowChange = { [weak coordinator] window in
+            coordinator?.setWindow(window)
+        }
+        nsView.reportWindow()
+    }
+}
+
+@MainActor
+private final class PanelWindowReaderView: NSView {
+    var onWindowChange: ((NSWindow?) -> Void)?
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        reportWindow()
+    }
+
+    func reportWindow() {
+        onWindowChange?(window)
+    }
+}
+
 enum SystemMetricPresentation {
     static func percent(_ value: Double?) -> String {
         guard let value, value.isFinite else { return "--" }
@@ -43,6 +107,7 @@ enum SystemMetricPresentation {
 
 struct GaugeRootView: View {
     @ObservedObject var model: AppModel
+    let dragCoordinator: PanelDragCoordinator
 
     var body: some View {
         ScrollView(.vertical, showsIndicators: false) {
@@ -84,6 +149,12 @@ struct GaugeRootView: View {
                         .padding(.vertical, 4)
                         .background(.quaternary, in: Capsule())
                 }
+            }
+            .frame(maxWidth: .infinity, minHeight: 34, alignment: .leading)
+            .overlay {
+                PanelWindowDragHandle(coordinator: dragCoordinator)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .accessibilityHidden(true)
             }
 
             if let windows = model.snapshot?.displayWindows, windows.count >= 2 {
